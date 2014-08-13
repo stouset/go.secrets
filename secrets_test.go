@@ -120,3 +120,28 @@ func TestEmptySecret(t *testing.T) {
 		t.Error("secret1.Equal(secret3) = true, _; want false")
 	}
 }
+
+func TestSecretCanary(t *testing.T) {
+	var (
+		secret, _ = NewSecret(32)
+		slice     = secret.Slice()
+	)
+
+	// trim the secret by one byte
+	secret.Trim(31)
+
+	secret.Write()
+	defer secret.Lock()
+
+	defer func() {
+		if recover() == nil {
+			t.Error("secret's canary should have triggered")
+		}
+	}()
+
+	// attempt to write past the secret's new length
+	slice[31] = 42
+
+	// the canary should trigger when the secret is wiped
+	secret.Wipe()
+}

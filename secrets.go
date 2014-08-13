@@ -86,7 +86,6 @@ func init() {
 // memory is zeroed out before being released back to the operating system.
 type Secret struct {
 	secret *secret
-	len    int
 }
 
 // NewSecret creates a new Secret capable of storing len bytes. The
@@ -102,10 +101,7 @@ func NewSecret(
 		err error
 	)
 
-	sec = Secret{
-		secret: &secret{},
-		len:    len,
-	}
+	sec = Secret{&secret{}}
 
 	// empty secrets are valid, but we don't have anything to do
 	if len == 0 {
@@ -154,10 +150,10 @@ func NewSecretFromBytes(
 }
 
 // Returns the length of the Secret in bytes.
-func (s Secret) Len() int { return s.len }
+func (s Secret) Len() int { return int(s.Size()) }
 
 // Returns the C size_t length of the Secret in bytes
-func (s Secret) Size() C.size_t { return C.size_t(s.len) }
+func (s Secret) Size() C.size_t { return s.secret.userSize }
 
 // Locks the Secret, preventing any access to its contents.
 func (s Secret) Lock() { s.secret.lock() }
@@ -193,8 +189,8 @@ func (s Secret) Pointer() unsafe.Pointer {
 func (s Secret) Slice() []byte {
 	sh := reflect.SliceHeader{
 		Data: uintptr(s.Pointer()),
-		Len:  s.len,
-		Cap:  s.len,
+		Len:  s.Len(),
+		Cap:  s.Len(),
 	}
 
 	// cast the address of the SliceHeader into a slice pointer,
@@ -208,8 +204,8 @@ func (s Secret) Slice() []byte {
 // Secret. If len is larger than the current length of the secret,
 // no operation is performed.
 func (s Secret) Trim(len int) {
-	if len > s.len {
-		len = s.len
+	if len > int(s.secret.userSize) {
+		len = int(s.secret.userSize)
 	}
 
 	// reduce the size of the secret to the requested length and
@@ -222,7 +218,7 @@ func (s Secret) Trim(len int) {
 // the new Secret or unlocking the existing Secret fails, returns an
 // error.
 func (s Secret) Copy() (*Secret, error) {
-	copy, err := NewSecret(int(s.len))
+	copy, err := NewSecret(s.Len())
 
 	if err != nil {
 		return nil, err
@@ -298,8 +294,8 @@ func (s *secret) alloc(size C.size_t) error {
 
 	// calculate the size of the user region, then allocate enough
 	// guarded pages for that amount
-	s.userSize = size + canarySize
-	s.userPtr, err = guarded_alloc(s.userSize)
+	s.userSize = size
+	s.userPtr, err = guarded_alloc(s.allocSize())
 
 	if err != nil {
 		return err
@@ -327,7 +323,7 @@ func (s *secret) free() {
 	s.unguard()
 
 	// free the entire allocated region
-	guarded_free(s.userPtr, s.userSize)
+	guarded_free(s.userPtr, s.allocSize())
 
 	// don't maintain dangling pointers
 	s.userPtr = nil
@@ -340,9 +336,9 @@ func (s *secret) free() {
 func (s *secret) guard() error {
 	s.unlock(C.PROT_WRITE)
 
-	// we only need to mlock the user-accessible region; the guard
-	// pages can be swapped to disk
-	if ret, err := C.sodium_mlock(s.userPtr, s.userSize+canarySize); ret != 0 {
+	// we only need to mlock the region we requested; the guard
+	// pages can be swapped to disk if the OS wants to
+	if ret, err := C.sodium_mlock(s.userPtr, s.allocSize()); ret != 0 {
 		return err
 	}
 
@@ -372,7 +368,7 @@ func (s *secret) unguard() {
 	s.unlock(C.PROT_WRITE)
 
 	// wipe the user region (and canary, to avoid it from being leaked)
-	C.sodium_munlock(s.userPtr, s.userSize)
+	C.sodium_munlock(s.userPtr, s.allocSize())
 
 	// finally, completely unlock the user region
 	s.unlock(C.PROT_READ | C.PROT_WRITE)
@@ -392,6 +388,10 @@ func (s *secret) unlock(prot C.int) {
 	if ret, err := C.mprotect(s.userPtr, s.userSize, prot); ret != 0 {
 		panic(err)
 	}
+}
+
+func (s secret) allocSize() C.size_t {
+	return s.userSize + canarySize
 }
 
 // Returns a pointer to the secret's canary.
