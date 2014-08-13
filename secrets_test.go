@@ -5,32 +5,29 @@ import (
 	"testing"
 )
 
-func Example() {
+func ExampleNewSecret() {
+	// allocate a new 8-byte secret
 	secret, err := NewSecret(8)
 
 	if err != nil {
 		return
 	}
 
-	// always pair an unlocking method with a deferred lock
-	secret.Write()
+	// allow the secret to be read; good hygeine dictates that the
+	// Lock() should be deferred, so it is guaranteed to happen
+	// when the method returns
+	secret.Read()
 	defer secret.Lock()
 
-	copy(secret.Slice(), []byte("secrets!"))
+	fmt.Printf("0x%x", secret.Slice())
 
-	// switch the secret to be readable; deferred lock isn't
-	// necessary here because we're already locking at the end of
-	// the method
-	secret.Read()
-
-	fmt.Printf("%s\n", secret.Slice())
-
-	// not strictly necessary; this will happen when the secret is
-	// garbage collected, but being explicit is good hygeine and
-	// causes the secret to be wiped from memory immediately
+	// while not strictly necessary, explicitly wiping the secret
+	// when done is also good hygeine; this will happen when
+	// the secret is garbage collected, but doing it explicitly
+	// causes the memory to be zeroed immediately
 	secret.Wipe()
 
-	// Output: secrets!
+	// Output: 0x0000000000000000
 }
 
 func ExampleNewSecretFromBytes() {
@@ -46,14 +43,60 @@ func ExampleNewSecretFromBytes() {
 	secret.Read()
 	defer secret.Lock()
 
-	fmt.Printf("Secret: 0x%x\n", secret.Slice())
-	fmt.Printf("Slice: 0x%x\n", bytes)
+	fmt.Printf("0x%x", secret.Slice())
 
 	secret.Wipe()
 
-	// Output:
-	// Secret: 0x7365637265747321
-	// Slice: 0x0000000000000000
+	// Output: 0x7365637265747321
+}
+
+func ExampleNewSecretFromBytes_zeroing() {
+	var (
+		bytes  = []byte("secrets!")
+		_, err = NewSecretFromBytes(bytes)
+	)
+
+	if err != nil {
+		return
+	}
+
+	fmt.Printf("0x%x\n", bytes)
+
+	// Output: 0x0000000000000000
+}
+
+func ExampleSecret_Trim() {
+	secret, err := NewSecretFromBytes([]byte("secret!"))
+
+	if err != nil {
+		return
+	}
+
+	secret.Trim(4)
+
+	secret.Read()
+	defer secret.Lock()
+
+	fmt.Printf("%s", secret.Slice())
+
+	secret.Wipe()
+
+	// Output: secr
+}
+
+func ExampleSecret_Wipe() {
+	secret, err := NewSecretFromBytes([]byte("secret!"))
+
+	if err != nil {
+		return
+	}
+
+	secret.Wipe()
+
+	// The pointer to the Secret should be NULL
+	fmt.Printf("%x\n", secret.Pointer())
+
+	// Output: 0
 }
 
 func TestNewSecret(t *testing.T) {
