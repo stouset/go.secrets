@@ -239,6 +239,28 @@ func (s Secret) Trim(len int) error {
 	return s.secret.realloc(C.size_t(len))
 }
 
+// Splits the Secret into two halves, with the right half beginning at
+// the specified offset. The original secret is trimmed to only
+// contain the contents of the left half, and the contents of the
+// right half are copied into a new Secret which is returned.
+func (s Secret) Split(offset int) (*Secret, error) {
+	var (
+		right *Secret
+		err   error
+	)
+
+	s.ReadWrite()
+	defer s.Lock()
+
+	if right, err = NewSecretFromBytes(s.Slice()[offset:]); err != nil {
+		return nil, err
+	}
+
+	s.Trim(offset)
+
+	return right, nil
+}
+
 // Compares two Secrets for equality in constant time.
 func (s Secret) Equal(other *Secret) bool {
 	if s.Len() != other.Len() {
@@ -400,6 +422,9 @@ func guardedRealloc(
 	}
 
 	if old > new {
+		// TODO(stephen):
+		// - wipe the now-unused part of the secret
+
 		canaryVerify(ptr, old)
 		canaryWrite(ptr, new)
 

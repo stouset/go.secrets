@@ -96,6 +96,23 @@ func ExampleSecret_Trim() {
 	// Output: secr
 }
 
+func ExampleSecret_Split() {
+	var (
+		secret1, _ = NewSecretFromBytes([]byte("secret!"))
+		secret2, _ = secret1.Split(4)
+	)
+
+	secret1.Read()
+	defer secret1.Lock()
+
+	secret2.Read()
+	defer secret2.Lock()
+
+	fmt.Printf("%s %s", secret1.Slice(), secret2.Slice())
+
+	// Output: secr et!
+}
+
 func ExampleSecret_Wipe() {
 	secret, err := NewSecretFromBytes([]byte("secret!"))
 
