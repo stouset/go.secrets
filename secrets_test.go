@@ -141,38 +141,14 @@ func TestNewSecret(t *testing.T) {
 }
 
 func TestEmptySecret(t *testing.T) {
-	var (
-		secret1 *Secret
-		secret2 *Secret
-		secret3 *Secret
-		err     error
-	)
-
-	secret1, err = NewSecret(0)
+	secret, err := NewSecret(0)
 
 	if err != nil {
 		t.Error("NewSecret(0) = _, err; want nil")
 	}
 
-	secret2, err = NewSecretFromBytes([]byte(""))
-
-	if err != nil {
-		t.Error("NewSecretFromBytes(\"\") = _, err; want nil")
-	}
-
-	secret3, err = NewSecretFromBytes([]byte("xyz"))
-
-	if err != nil {
-		t.Error("NewSecretFromBytes(\"xyz\") = _, err; want nil")
-	}
-
-	if !secret1.Equal(secret2) {
-		t.Error("secret1.Equal(secret2) = false, _; want true")
-
-	}
-
-	if secret1.Equal(secret3) {
-		t.Error("secret1.Equal(secret3) = true, _; want false")
+	if secret.Pointer() != nil {
+		t.Errorf("secret.Pointer() = %x; want 0", secret.Pointer())
 	}
 }
 
