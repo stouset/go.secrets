@@ -411,6 +411,7 @@ func guarded_alloc_size(size C.size_t) C.size_t {
 // space to contain size bytes. An error is returned if the memory
 // can't be allocated or protected.
 func guarded_alloc(size C.size_t) (unsafe.Pointer, error) {
+	// recalculate the size to include a pair of guard pages
 	size = guarded_alloc_size(size)
 
 	ptr, err := C.mmap(nil, size, C.PROT_NONE, C.MAP_ANON|C.MAP_PRIVATE, -1, 0)
@@ -419,7 +420,7 @@ func guarded_alloc(size C.size_t) (unsafe.Pointer, error) {
 		return nil, err
 	}
 
-	// return a pointer to the interior pages
+	// return a pointer to the interior non-guard pages
 	return _ptrAdd(ptr, pageSize), nil
 }
 
