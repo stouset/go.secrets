@@ -60,9 +60,21 @@ func ExampleNewSecretFromBytes_zeroing() {
 		return
 	}
 
-	fmt.Printf("0x%x\n", bytes)
+	fmt.Printf("0x%x", bytes)
 
 	// Output: 0x0000000000000000
+}
+
+func ExampleSecret_Equal() {
+	var (
+		secret1, _ = NewSecretFromBytes([]byte("secret"))
+		secret2, _ = NewSecretFromBytes([]byte("secret"))
+		secret3, _ = NewSecretFromBytes([]byte("secrex"))
+	)
+
+	fmt.Printf("%t %t", secret1.Equal(secret2), secret1.Equal(secret3))
+
+	// Output: true false
 }
 
 func ExampleSecret_Trim() {
