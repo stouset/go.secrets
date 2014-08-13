@@ -170,9 +170,24 @@ func TestSecretCanary(t *testing.T) {
 		}
 	}()
 
-	// attempt to write past the secret's new length
+	// attempt to write past the secret's reduced length
 	slice[31] = 42
 
 	// the canary should trigger when the secret is wiped
 	secret.Wipe()
+}
+
+func TestSecretCopies(t *testing.T) {
+	var (
+		secret1, _ = NewSecretFromBytes([]byte("secret stuff"))
+		secret2, _ = NewSecretFromBytes([]byte("secret stuff"))
+		secret3, _ = secret1.Copy()
+	)
+
+	secret1.Wipe()
+
+	if !secret3.Equal(secret2) {
+		// oops, looks like we didn't actually copy the contents
+		t.Error("secret3.Equal(secret2) = false; want true")
+	}
 }
