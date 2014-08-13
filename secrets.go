@@ -75,7 +75,7 @@ func init() {
 		panic("secrets: couldn't allocate memory for a canary")
 	}
 
-	if int(C.sodium_init()) != 0 {
+	if int(C.sodium_init()) == -1 {
 		panic("secrets: libsodium couldn't be initialized")
 	}
 
