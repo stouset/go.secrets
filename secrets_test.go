@@ -77,6 +77,25 @@ func ExampleSecret_Equal() {
 	// Output: true false
 }
 
+func ExampleSecret_Trim() {
+	secret, err := NewSecretFromBytes([]byte("secret!"))
+
+	if err != nil {
+		return
+	}
+
+	secret.Trim(4)
+
+	secret.Read()
+	defer secret.Lock()
+
+	fmt.Printf("%s", secret.Slice())
+
+	secret.Wipe()
+
+	// Output: secr
+}
+
 func ExampleSecret_Wipe() {
 	secret, err := NewSecretFromBytes([]byte("secret!"))
 
@@ -134,7 +153,13 @@ func TestEmptySecret(t *testing.T) {
 }
 
 func TestSecretCanary(t *testing.T) {
-	secret, _ := NewSecret(32)
+	var (
+		secret, _ = NewSecret(32)
+		slice     = secret.Slice()
+	)
+
+	// trim the secret by one byte
+	secret.Trim(31)
 
 	secret.Write()
 	defer secret.Lock()
@@ -146,8 +171,7 @@ func TestSecretCanary(t *testing.T) {
 	}()
 
 	// attempt to write past the secret's reduced length
-	secret.secret.size += 1
-	secret.Slice()[32] = 42
+	slice[31] = 42
 
 	// the canary should trigger when the secret is wiped
 	secret.Wipe()

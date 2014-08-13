@@ -226,6 +226,19 @@ func (s Secret) Copy() (*Secret, error) {
 	return copy, nil
 }
 
+// Reduces the size of the Secret to len bytes. The location of the
+// overflow canary is adjusted to reflect the new size of the
+// Secret. If len is larger than the current length of the secret,
+// no operation is performed.
+func (s Secret) Trim(len int) error {
+	// trim only shrinks; otherwise it's a no-op
+	if len >= s.Len() {
+		return nil
+	}
+
+	return s.secret.realloc(C.size_t(len))
+}
+
 // Compares two Secrets for equality in constant time.
 func (s Secret) Equal(other *Secret) bool {
 	if s.Len() != other.Len() {
@@ -300,6 +313,19 @@ func (s *secret) alloc(size C.size_t) error {
 	return nil
 }
 
+func (s *secret) realloc(size C.size_t) error {
+	ptr, err := guardedRealloc(s.ptr, s.size, size)
+
+	if err != nil {
+		return err
+	}
+
+	s.ptr = ptr
+	s.size = size
+
+	return nil
+}
+
 // Zeroes out the contents of the secret and releases its memory back
 // to the system.
 func (s *secret) free() {
@@ -342,8 +368,6 @@ func guardedAlloc(size C.size_t) (unsafe.Pointer, error) {
 	var (
 		userSize  = size + canarySize
 		allocSize = guardedAllocSize(userSize)
-
-		ret C.int
 	)
 
 	allocPtr, err := C.mmap(nil, allocSize, C.PROT_NONE, C.MAP_ANON|C.MAP_PRIVATE, -1, 0)
@@ -352,10 +376,7 @@ func guardedAlloc(size C.size_t) (unsafe.Pointer, error) {
 		return nil, err
 	}
 
-	var (
-		userPtr   = _ptrAdd(allocPtr, pageSize)
-		canaryPtr = _ptrAdd(userPtr, size)
-	)
+	userPtr := _ptrAdd(allocPtr, pageSize)
 
 	// we only need to mlock the user region; the guard pages can
 	// be swapped to disk if the OS wants to
@@ -363,21 +384,29 @@ func guardedAlloc(size C.size_t) (unsafe.Pointer, error) {
 		return nil, err
 	}
 
-	// allow the user region to be written to, for the canary
-	if ret, err = C.mprotect(userPtr, userSize, C.PROT_WRITE); ret != 0 {
-		return nil, err
-	}
-
-	// write the canary immediately after the user region
-	C.memcpy(canaryPtr, canary, canarySize)
-
-	// re-lock the user region
-	if ret, err = C.mprotect(userPtr, userSize, C.PROT_NONE); ret != 0 {
-		return nil, err
-	}
+	canaryWrite(userPtr, size)
 
 	// return a pointer to the interior non-guard pages
 	return userPtr, nil
+}
+
+func guardedRealloc(
+	ptr unsafe.Pointer,
+	old C.size_t,
+	new C.size_t,
+) (unsafe.Pointer, error) {
+	if old == new {
+		return ptr, nil
+	}
+
+	if old > new {
+		canaryVerify(ptr, old)
+		canaryWrite(ptr, new)
+
+		return ptr, nil
+	}
+
+	panic("secrets: guardedRealloc only shrinks allocations")
 }
 
 // Frees an earlier allocation of the given number of bytes. Also
@@ -387,20 +416,14 @@ func guardedFree(ptr unsafe.Pointer, size C.size_t) {
 		allocSize = guardedAllocSize(size)
 		userSize  = size + canarySize
 
-		allocPtr  = _ptrAdd(ptr, -pageSize)
-		userPtr   = ptr
-		canaryPtr = _ptrAdd(ptr, size)
+		allocPtr = _ptrAdd(ptr, -pageSize)
+		userPtr  = ptr
 	)
 
-	// ensure the canary can be read and the user area can be
-	// wiped clean
+	canaryVerify(userPtr, size)
+
 	if ret, err := C.mprotect(userPtr, userSize, C.PROT_READ|C.PROT_WRITE); ret != 0 {
 		panic(err)
-	}
-
-	// verify the canary
-	if C.memcmp(canaryPtr, canary, canarySize) != C.int(0) {
-		panic("secrets: buffer overflow canary triggered")
 	}
 
 	// wipe the user region (and canary, to avoid it from being leaked)
@@ -409,9 +432,52 @@ func guardedFree(ptr unsafe.Pointer, size C.size_t) {
 	C.munmap(allocPtr, allocSize)
 }
 
+func canaryWrite(ptr unsafe.Pointer, size C.size_t) {
+	var (
+		canaryPtr     = _ptrAdd(ptr, size)
+		canaryPagePtr = _ptrPageRound(canaryPtr)
+	)
+
+	// allow the user region to be written to, for the canary
+	if ret, _ := C.mprotect(canaryPagePtr, canarySize, C.PROT_WRITE); ret != 0 {
+		panic("secrets: couldn't write a canary")
+	}
+
+	// write the canary immediately after the user region
+	C.memcpy(canaryPtr, canary, canarySize)
+
+	// re-lock the user region
+	if ret, _ := C.mprotect(canaryPagePtr, canarySize, C.PROT_NONE); ret != 0 {
+		panic("secrets: couldn't write a canary")
+	}
+}
+
+func canaryVerify(ptr unsafe.Pointer, size C.size_t) {
+	var (
+		canaryPtr     = _ptrAdd(ptr, size)
+		canaryPagePtr = _ptrPageRound(canaryPtr)
+	)
+
+	// ensure the canary can be read and the user area can be
+	// wiped clean
+	if ret, err := C.mprotect(canaryPagePtr, canarySize, C.PROT_READ); ret != 0 {
+		panic(err)
+	}
+
+	// verify the canary
+	if C.memcmp(canaryPtr, canary, canarySize) != C.int(0) {
+		panic("secrets: buffer overflow canary triggered")
+	}
+}
+
+// Rounds the provided pointer to the beginning of its page.
+func _ptrPageRound(ptr unsafe.Pointer) unsafe.Pointer {
+	return _ptrAdd(ptr, -(C.size_t(uintptr(ptr)) % pageSize))
+}
+
 // Rounds size to the next highest page boundary.
 func _pageRound(size C.size_t) C.size_t {
-	return ((size + pageSize) / pageSize) * pageSize
+	return (size/pageSize)*pageSize + pageSize
 }
 
 // Returns a pointer to the underlying buffer and the size of a byte slice.
