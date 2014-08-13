@@ -51,6 +51,8 @@ package secrets
 // #include <sodium/core.h>
 // #include <sodium/randombytes.h>
 // #include <sodium/utils.h>
+//
+// #define _MAP_FAILED (intptr_t)MAP_FAILED
 import "C"
 
 import (
@@ -153,7 +155,7 @@ func NewSecretFromBytes(
 func (s Secret) Len() int { return int(s.Size()) }
 
 // Returns the C size_t length of the Secret in bytes
-func (s Secret) Size() C.size_t { return s.secret.userSize }
+func (s Secret) Size() C.size_t { return s.secret.size }
 
 // Locks the Secret, preventing any access to its contents.
 func (s Secret) Lock() { s.secret.lock() }
@@ -179,7 +181,7 @@ func (s Secret) ReadWrite() { s.secret.unlock(C.PROT_READ | C.PROT_WRITE) }
 // can only be read from or written to when the Secret itself is
 // unlocked.
 func (s Secret) Pointer() unsafe.Pointer {
-	return s.secret.userPtr
+	return s.secret.ptr
 }
 
 // Returns a byte slice containing the contents of the Secret. This
@@ -197,21 +199,6 @@ func (s Secret) Slice() []byte {
 	// then take the value of that pointer to get the data as an
 	// actual slice
 	return *(*[]byte)(unsafe.Pointer(&sh))
-}
-
-// Reduces the size of the Secret to len bytes. The location of the
-// overflow canary is adjusted to reflect the new size of the
-// Secret. If len is larger than the current length of the secret,
-// no operation is performed.
-func (s Secret) Trim(len int) {
-	if len > int(s.secret.userSize) {
-		len = int(s.secret.userSize)
-	}
-
-	// reduce the size of the secret to the requested length and
-	// replace the canary
-	s.secret.userSize = C.size_t(len)
-	s.secret.guard()
 }
 
 // Copies a Secret's contents into a new Secret. If either allocating
@@ -280,8 +267,8 @@ func (s Secret) Wipe() {
 // values to functions) and garbage collected without invoking the
 // finalizer.
 type secret struct {
-	userPtr  unsafe.Pointer
-	userSize C.size_t
+	ptr  unsafe.Pointer
+	size C.size_t
 }
 
 // Allocates enough memory to contain size bytes, plus room for a
@@ -294,8 +281,8 @@ func (s *secret) alloc(size C.size_t) error {
 
 	// calculate the size of the user region, then allocate enough
 	// guarded pages for that amount
-	s.userSize = size
-	s.userPtr, err = guarded_alloc(s.allocSize())
+	s.size = size
+	s.ptr, err = guardedAlloc(size)
 
 	if err != nil {
 		return err
@@ -305,13 +292,10 @@ func (s *secret) alloc(size C.size_t) error {
 	// allocated memory
 	runtime.SetFinalizer(s, func(s *secret) { s.free() })
 
-	// guard the allocated pages
-	s.guard()
-
 	s.unlock(C.PROT_WRITE)
 	defer s.lock()
 
-	C.sodium_memzero(s.userPtr, s.userSize)
+	C.sodium_memzero(s.ptr, s.size)
 
 	return nil
 }
@@ -319,65 +303,18 @@ func (s *secret) alloc(size C.size_t) error {
 // Zeroes out the contents of the secret and releases its memory back
 // to the system.
 func (s *secret) free() {
-	// unguard the allocated pages
-	s.unguard()
-
 	// free the entire allocated region
-	guarded_free(s.userPtr, s.allocSize())
+	guardedFree(s.ptr, s.size)
 
 	// don't maintain dangling pointers
-	s.userPtr = nil
-	s.userSize = 0
-}
-
-// Locks the user region into memory and places an overflow canary
-// directly adjacent to it. Protects the memory against any access
-// before returning.
-func (s *secret) guard() error {
-	s.unlock(C.PROT_WRITE)
-
-	// we only need to mlock the region we requested; the guard
-	// pages can be swapped to disk if the OS wants to
-	if ret, err := C.sodium_mlock(s.userPtr, s.allocSize()); ret != 0 {
-		return err
-	}
-
-	// write the canary immediately after the user region
-	C.memcpy(s.canaryPtr(), canary, canarySize)
-
-	// default the user region to being inaccessible
-	s.lock()
-
-	return nil
-}
-
-// Verifies the overflow canary before unlocking the allocated
-// memory. The memory region is allowed to be read and written to once
-// this method returns.
-func (s *secret) unguard() {
-	// ensure the user region can be read from in order to check
-	// the canary
-	s.unlock(C.PROT_READ)
-
-	// verify the canary
-	if C.memcmp(s.canaryPtr(), canary, canarySize) != C.int(0) {
-		panic("secrets: buffer overflow canary triggered")
-	}
-
-	// allow the user region to be written to so it can be zeroed
-	s.unlock(C.PROT_WRITE)
-
-	// wipe the user region (and canary, to avoid it from being leaked)
-	C.sodium_munlock(s.userPtr, s.allocSize())
-
-	// finally, completely unlock the user region
-	s.unlock(C.PROT_READ | C.PROT_WRITE)
+	s.ptr = nil
+	s.size = 0
 }
 
 // Locks the secret's contents, preventing them from being read,
 // written to, or executed.
 func (s *secret) lock() {
-	if ret, err := C.mprotect(s.userPtr, s.userSize, C.PROT_NONE); ret != 0 {
+	if ret, err := C.mprotect(s.ptr, s.size, C.PROT_NONE); ret != 0 {
 		panic(err)
 	}
 }
@@ -385,23 +322,14 @@ func (s *secret) lock() {
 // Unlocks the secret's contents, giving them the protection level
 // specified.
 func (s *secret) unlock(prot C.int) {
-	if ret, err := C.mprotect(s.userPtr, s.userSize, prot); ret != 0 {
+	if ret, err := C.mprotect(s.ptr, s.size, prot); ret != 0 {
 		panic(err)
 	}
 }
 
-func (s secret) allocSize() C.size_t {
-	return s.userSize + canarySize
-}
-
-// Returns a pointer to the secret's canary.
-func (s secret) canaryPtr() unsafe.Pointer {
-	return _ptrAdd(s.userPtr, s.userSize)
-}
-
 // Calculates the size of an allocation with enough room for two extra
 // guard pages.
-func guarded_alloc_size(size C.size_t) C.size_t {
+func guardedAllocSize(size C.size_t) C.size_t {
 	return 2*pageSize + _pageRound(size)
 }
 
@@ -410,29 +338,75 @@ func guarded_alloc_size(size C.size_t) C.size_t {
 // returned points to a region inbetween the guard pages with enough
 // space to contain size bytes. An error is returned if the memory
 // can't be allocated or protected.
-func guarded_alloc(size C.size_t) (unsafe.Pointer, error) {
-	// recalculate the size to include a pair of guard pages
-	size = guarded_alloc_size(size)
+func guardedAlloc(size C.size_t) (unsafe.Pointer, error) {
+	var (
+		userSize  = size + canarySize
+		allocSize = guardedAllocSize(userSize)
 
-	ptr, err := C.mmap(nil, size, C.PROT_NONE, C.MAP_ANON|C.MAP_PRIVATE, -1, 0)
+		ret C.int
+	)
 
-	if err != nil {
+	allocPtr, err := C.mmap(nil, allocSize, C.PROT_NONE, C.MAP_ANON|C.MAP_PRIVATE, -1, 0)
+
+	if int(uintptr(allocPtr)) == C._MAP_FAILED {
+		return nil, err
+	}
+
+	var (
+		userPtr   = _ptrAdd(allocPtr, pageSize)
+		canaryPtr = _ptrAdd(userPtr, size)
+	)
+
+	// we only need to mlock the user region; the guard pages can
+	// be swapped to disk if the OS wants to
+	if ret, err := C.sodium_mlock(userPtr, userSize); ret != 0 {
+		return nil, err
+	}
+
+	// allow the user region to be written to, for the canary
+	if ret, err = C.mprotect(userPtr, userSize, C.PROT_WRITE); ret != 0 {
+		return nil, err
+	}
+
+	// write the canary immediately after the user region
+	C.memcpy(canaryPtr, canary, canarySize)
+
+	// re-lock the user region
+	if ret, err = C.mprotect(userPtr, userSize, C.PROT_NONE); ret != 0 {
 		return nil, err
 	}
 
 	// return a pointer to the interior non-guard pages
-	return _ptrAdd(ptr, pageSize), nil
+	return userPtr, nil
 }
 
 // Frees an earlier allocation of the given number of bytes. Also
 // makes sure to free the surrounding pages.
-func guarded_free(ptr unsafe.Pointer, size C.size_t) {
-	// calculate the true base of the pointer and the size of the
-	// allocated region
-	ptr = _ptrAdd(ptr, -pageSize)
-	size = guarded_alloc_size(size)
+func guardedFree(ptr unsafe.Pointer, size C.size_t) {
+	var (
+		allocSize = guardedAllocSize(size)
+		userSize  = size + canarySize
 
-	C.munmap(ptr, size)
+		allocPtr  = _ptrAdd(ptr, -pageSize)
+		userPtr   = ptr
+		canaryPtr = _ptrAdd(ptr, size)
+	)
+
+	// ensure the canary can be read and the user area can be
+	// wiped clean
+	if ret, err := C.mprotect(userPtr, userSize, C.PROT_READ|C.PROT_WRITE); ret != 0 {
+		panic(err)
+	}
+
+	// verify the canary
+	if C.memcmp(canaryPtr, canary, canarySize) != C.int(0) {
+		panic("secrets: buffer overflow canary triggered")
+	}
+
+	// wipe the user region (and canary, to avoid it from being leaked)
+	C.sodium_munlock(userPtr, userSize)
+
+	C.munmap(allocPtr, allocSize)
 }
 
 // Rounds size to the next highest page boundary.
